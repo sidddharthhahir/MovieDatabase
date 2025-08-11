@@ -1,0 +1,33 @@
+{% extends "base.html" %}
+{% block title %}Browse Movies{% endblock %}
+{% block content %}
+<h2>Browse</h2>
+<form class="row g-2 mb-3">
+  <div class="col-md-6"><input class="form-control" name="q" value="{{ q }}" placeholder="Search by title..."></div>
+  <div class="col-md-4">
+    <select class="form-select" name="genre">
+      <option value="">All genres</option>
+      {% for g in genres %}
+        <option value="{{ g }}" {% if request.GET.genre == g %}selected{% endif %}>{{ g }}</option>
+      {% endfor %}
+    </select>
+  </div>
+  <div class="col-md-2"><button class="btn btn-primary w-100">Filter</button></div>
+</form>
+<div class="row row-cols-2 row-cols-md-4 g-4">
+  {% for m in movies %}
+    <div class="col">
+      <div class="card h-100">
+        <img src="{{ m.poster_url }}" class="card-img-top" alt="{{ m.title }}">
+        <div class="card-body">
+          <h6 class="card-title">{{ m.title }}</h6>
+          <p class="small mb-1">Rating: {{ m.vote_average }} | Popularity: {{ m.popularity|floatformat:0 }}</p>
+          <a href="{% url 'movies:detail' m.tmdb_id %}" class="btn btn-sm btn-outline-primary">Details</a>
+        </div>
+      </div>
+    </div>
+  {% empty %}
+    <p>No movies found.</p>
+  {% endfor %}
+</div>
+{% endblock %}

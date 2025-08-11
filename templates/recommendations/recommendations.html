@@ -1,0 +1,65 @@
+{% extends "base.html" %}
+
+{% block title %}My Recommendations{% endblock %}
+
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-3">
+  <h2>Recommendations</h2>
+  <a class="btn btn-outline-secondary btn-sm" href="{% url 'recs:train' %}">Train/Refresh Models</a>
+</div>
+
+<div class="row row-cols-1 row-cols-md-2 g-4">
+  {% for c in cards %}
+    <div class="col">
+      <div class="card h-100">
+        <div class="row g-0">
+          <div class="col-md-4 p-2">
+            <img src="{{ c.movie.poster_url }}" class="img-fluid rounded" alt="{{ c.title }}">
+          </div>
+          <div class="col-md-8">
+            <div class="card-body">
+              <div class="d-flex justify-content-between align-items-start">
+                <h5 class="card-title mb-1">{{ c.title }}</h5>
+                {% if c.algorithm %}
+                  <span class="badge bg-secondary ms-2">{{ c.algorithm|title }}</span>
+                {% endif %}
+              </div>
+
+              {% if c.score %}
+                <p class="card-text text-muted mb-1">Score: {{ c.score }}</p>
+              {% endif %}
+
+              {% if c.prob %}
+                <p class="card-text mb-1"><b>Predicted Like:</b> {{ c.prob }}</p>
+              {% endif %}
+
+              <p class="card-text">{{ c.why }}</p>
+
+              {% if c.shap_img %}
+                <h6 class="mt-3">SHAP</h6>
+                <img class="shap-img img-fluid rounded border" src="{{ c.shap_img }}" alt="SHAP">
+              {% endif %}
+
+              {% if c.lime_list %}
+                <h6 class="mt-3">LIME (top factors)</h6>
+                <ul class="small mb-2">
+                  {% for f in c.lime_list %}
+                    <li>
+                      {% if f.feature %}<b>{{ f.feature }}</b>{% else %}<b>{{ f.name }}</b>{% endif %}:
+                      {% if f.importance %}{{ f.importance }}{% else %}{{ f.contribution }}{% endif %}
+                    </li>
+                  {% endfor %}
+                </ul>
+              {% endif %}
+
+              <a href="{% url 'movies:detail' c.movie.tmdb_id %}" class="btn btn-sm btn-outline-primary">View details</a>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  {% empty %}
+    <p>No recommendations yet. Rate a few movies to get tailored picks.</p>
+  {% endfor %}
+</div>
+{% endblock %}
