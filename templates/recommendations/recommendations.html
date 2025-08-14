@@ -25,12 +25,16 @@
                 {% endif %}
               </div>
 
-              {% if c.score %}
-                <p class="card-text text-muted mb-1">Score: {{ c.score }}</p>
-              {% endif %}
-
+              {# Prefer showing the percentage if available #}
               {% if c.prob %}
                 <p class="card-text mb-1"><b>Predicted Like:</b> {{ c.prob }}</p>
+              {% elif c.score %}
+                {# Fallback: show score, formatted. If score is 0..1, treat it like a percent. #}
+                {% if c.score <= 1 %}
+                  <p class="card-text text-muted mb-1">Score: {{ c.score|floatformat:4 }}%</p>
+                {% else %}
+                  <p class="card-text text-muted mb-1">Score: {{ c.score|floatformat:10 }}</p>
+                {% endif %}
               {% endif %}
 
               <p class="card-text">{{ c.why }}</p>

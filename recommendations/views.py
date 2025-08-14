@@ -1,115 +1,23 @@
-# from django.shortcuts import render, redirect
-# from django.contrib.auth.decorators import login_required
-# from django.contrib import messages
-# from django.db.models import Q
-# from movies.models import Movie, Rating
-# from .ml_models import recommendation_system
-# from .explainers import explainer
-# import joblib, os
-# from django.conf import settings
-
-# @login_required
-# def train_models(request):
-#     try:
-#         recommendation_system.train_content_model()
-#         recommendation_system.train_collaborative_model()
-#         messages.success(request, 'Models trained successfully.')
-#     except Exception as e:
-#         messages.error(request, f'Error training models: {e}')
-#     return redirect('recs:list')
-
-# @login_required
-# def my_recommendations(request):
-#     recommendation_system.load_models()
-#     seed = request.GET.get('seed')
-#     recs = []
-#     explain_cards = []
-#     user_id = request.user.id
-
-#     # If user has no ratings yet, suggest popular
-#     if not Rating.objects.filter(user_id=user_id).exists():
-#         movies = Movie.objects.order_by('-popularity')[:12]
-#         for m in movies:
-#             explain_cards.append({
-#                 'title': m.title,
-#                 'why': "Popular and highly rated by the community.",
-#                 'prob': None,
-#                 'shap_img': None,
-#                 'lime_list': None,
-#                 'movie': m,
-#             })
-#         return render(request, 'recommendations/recommendations.html', {'cards': explain_cards})
-
-#     # Otherwise try hybrid: if seed provided, content-based; plus collaborative explanation if available
-#     if seed:
-#         seed = int(seed)
-#         content_recs = recommendation_system.get_content_recommendations(seed, n_recommendations=10)
-#         movie_map = {m.id: m for m in Movie.objects.filter(id__in=[r['movie_id'] for r in content_recs])}
-#         for r in content_recs:
-#             m = movie_map.get(r['movie_id'])
-#             if not m: continue
-#             content_expl = explainer.explain_content_recommendation(seed, m.id)
-#             why_text = explainer.generate_explanation_text(content_expl, m.title)
-#             explain_cards.append({
-#                 'title': m.title,
-#                 'why': why_text,
-#                 'prob': None,
-#                 'shap_img': None,
-#                 'lime_list': [{'feature': f['name'], 'importance': round(f['contribution'], 4)} for f in content_expl.get('features', [])][:6],
-#                 'movie': m,
-#             })
-
-#     # Collaborative explanation (if model exists and user in matrix)
-#     model_path = os.path.join(settings.BASE_DIR, 'ml_models')
-#     has_collab = os.path.exists(os.path.join(model_path, 'collaborative_model.pkl'))
-#     if has_collab:
-#         # Use user's highly rated top-3 to anchor
-#         rated = Rating.objects.filter(user_id=user_id).order_by('-rating')[:3]
-#         # Use popular unseen as candidates; in a real system, combine with model predictions
-#         seen_ids = Rating.objects.filter(user_id=user_id).values_list('movie_id', flat=True)
-#         candidates = Movie.objects.exclude(id__in=seen_ids).order_by('-popularity')[:30]
-#         for m in candidates[:10]:
-#             collab_expl = explainer.explain_collaborative_recommendation(user_id, m.id)
-#             if collab_expl.get('error'):
-#                 continue
-#             prob = collab_expl.get('prediction_probability', 0)
-#             shap_vals = collab_expl.get('shap_values', [])
-#             feature_names = [f"Movie_{i}" for i in collab_expl.get('top_movies', [])]
-#             shap_img = explainer.create_shap_plot(shap_values=__import__('numpy').array(shap_vals), feature_names=feature_names)
-#             why_text = explainer.generate_explanation_text(collab_expl, m.title)
-#             explain_cards.append({
-#                 'title': m.title,
-#                 'why': why_text,
-#                 'prob': f"{prob:.1%}",
-#                 'shap_img': shap_img,
-#                 'lime_list': collab_expl.get('lime_features', [])[:6],
-#                 'movie': m,
-#             })
-
-#     if not explain_cards:
-#         movies = Movie.objects.order_by('-popularity')[:12]
-#         for m in movies:
-#             explain_cards.append({
-#                 'title': m.title,
-#                 'why': "Fallback to popularity since no model/explanations available yet.",
-#                 'prob': None,
-#                 'shap_img': None,
-#                 'lime_list': None,
-#                 'movie': m,
-#             })
-
-#     return render(request, 'recommendations/recommendations.html', {'cards': explain_cards})
-from django.shortcuts import render, redirect
+from django.shortcuts import render, redirect, get_object_or_404
 from django.contrib.auth.decorators import login_required
 from django.contrib import messages
+from django.http import JsonResponse
+from django.urls import reverse
 from movies.models import Movie, Rating
 from django.conf import settings
+from django.db import models
 import os
 import numpy as np
 from .ml_models import recommendation_system
 from .explainers import explainer
 from recommendations.utils.feature_mapping import feature_to_movie, load_user_movie_columns
 import re
+
+# Optional Watchlist model (if your project has one)
+try:
+    from movies.models import Watchlist as WLModel
+except Exception:
+    WLModel = None
 
 LIME_RE = re.compile(r"^(Movie_\d+)\s*([<>]=?)\s*([-+]?\d*\.?\d+):\s*([-+]?\d*\.?\d+)$")
 
@@ -165,6 +73,7 @@ def humanize_lime_factors(lime_lines, user_ratings_by_movie_id):
             "user_rating": float(user_rating) if user_rating is not None else None,
         })
 
+    # Highest absolute contributions first
     out.sort(key=lambda d: abs(d["weight"]), reverse=True)
     return out
 
@@ -210,12 +119,62 @@ def train_models(request):
 @login_required
 def my_recommendations(request):
     recommendation_system.load_models()
-    seed = request.GET.get('seed')
-    explain_cards = []
     user_id = request.user.id
+    explain_cards = []
+    
+    # Content-based seed flow (accepts either internal id or tmdb_id)
+    seed_param = request.GET.get('seed')
+    if seed_param:
+        try:
+            seed_raw = int(seed_param)
+        except ValueError:
+            seed_raw = None
 
-    # Cold-start: Popular movies
-    if not Rating.objects.filter(user_id=user_id).exists():
+        seed_movie = None
+        if seed_raw is not None:
+            # Try tmdb_id first (likely from detail page), then internal id
+            seed_movie = Movie.objects.filter(tmdb_id=seed_raw).first() or Movie.objects.filter(id=seed_raw).first()
+
+        if seed_movie:
+            seed_id = seed_movie.id  # internal id
+            content_recs = recommendation_system.get_content_recommendations(seed_id, n_recommendations=10)
+            movie_map = {m.id: m for m in Movie.objects.filter(id__in=[r['movie_id'] for r in content_recs])}
+            seen_movie_ids = set()  # de-dup in seed flow
+            for r in content_recs:
+                m = movie_map.get(r['movie_id'])
+                if not m or m.id in seen_movie_ids:
+                    continue
+                seen_movie_ids.add(m.id)
+
+                content_expl = explainer.explain_content_recommendation(seed_id, m.id)
+                why_text = f"Similar to '{seed_movie.title}' - {explainer.generate_explanation_text(content_expl, m.title)}"
+                # LIME features to percent strings
+                lime_list = [
+                    {
+                        'feature': f.get('name') or f.get('feature') or '',
+                        'importance': f"{abs(f.get('contribution', 0.0)) * 100:.1f}%"
+                    }
+                    for f in (content_expl.get('features', []) or [])
+                ][:6]
+
+                explain_cards.append({
+                    'title': m.title,
+                    'why': why_text,
+                    'prob': f"{(r.get('score') or 0):.1%}",  # show as percent
+                    'shap_img': None,
+                    'lime_list': lime_list,
+                    'movie': m,
+                    'algorithm': 'content',
+                    'score': r.get('score'),
+                })
+            
+            return render(request, 'recommendations/recommendations.html', {'cards': explain_cards})
+    
+    # User-specific recommendations
+    user_recs = recommendation_system.get_user_recommendations(user_id, n_recommendations=12)
+
+    if not user_recs:
+        # Fallback to popular movies
         movies = Movie.objects.order_by('-popularity')[:12]
         for m in movies:
             explain_cards.append({
@@ -225,108 +184,229 @@ def my_recommendations(request):
                 'shap_img': None,
                 'lime_list': None,
                 'movie': m,
+                'algorithm': 'popularity',
+                'score': None,
             })
         return render(request, 'recommendations/recommendations.html', {'cards': explain_cards})
+    
+    # Stabilize ordering to avoid flicker for near-equal scores
+    try:
+        user_recs.sort(key=lambda r: (round(float(r.get('score', 0) or 0), 6), int(r['movie_id'])), reverse=True)
+    except Exception:
+        pass
+    
+    # Fetch movie objects
+    movie_ids = [rec['movie_id'] for rec in user_recs]
+    movies = {m.id: m for m in Movie.objects.filter(id__in=movie_ids)}
+    
+    # User's ratings for explanations
+    user_ratings_map = dict(Rating.objects.filter(user_id=user_id).values_list('movie_id', 'rating'))
+    
+    # Avoid duplicates on page
+    seen_movie_ids = set()
 
-    # Content-based seed flow
-    if seed:
-        seed = int(seed)
-        content_recs = recommendation_system.get_content_recommendations(seed, n_recommendations=10)
-        movie_map = {m.id: m for m in Movie.objects.filter(id__in=[r['movie_id'] for r in content_recs])}
-        for r in content_recs:
-            m = movie_map.get(r['movie_id'])
-            if not m:
-                continue
-            content_expl = explainer.explain_content_recommendation(seed, m.id)
-            why_text = explainer.generate_explanation_text(content_expl, m.title)
-            explain_cards.append({
-                'title': m.title,
-                'why': why_text,
-                'prob': None,
-                'shap_img': None,
-                'lime_list': [{'feature': f['name'], 'importance': round(f['contribution'], 4)} for f in content_expl.get('features', [])][:6],
-                'movie': m,
-            })
+    # Build cards
+    for rec in user_recs:
+        mid = rec['movie_id']
+        if mid in seen_movie_ids:
+            continue
+        seen_movie_ids.add(mid)
 
-    # Collaborative explanations (with item-aware charts)
-    model_path = os.path.join(settings.BASE_DIR, 'ml_models')
-    has_collab = os.path.exists(os.path.join(model_path, 'collaborative_model.pkl'))
-    if has_collab:
-        user_ratings_map = dict(Rating.objects.filter(user_id=user_id).values_list('movie_id', 'rating'))
-        seen_ids = Rating.objects.filter(user_id=user_id).values_list('movie_id', flat=True)
-        candidates = Movie.objects.exclude(id__in=seen_ids).order_by('-popularity')[:30]
-
-        for m in candidates[:10]:
-            collab_expl = explainer.explain_collaborative_recommendation(user_id, m.id)
-            if collab_expl.get('error'):
-                continue
-
-            prob = collab_expl.get('prediction_probability', 0.0)
-            shap_vals = collab_expl.get('shap_values', []) or []
-
-            # Item-aware contributions for the candidate (varies per card)
-            item_aware = explainer.explain_item_aware_with_content(
-                user_id=user_id,
-                candidate_movie_id=m.id,
-                content_model=getattr(recommendation_system, "content_model", None),
-                top_k=10,
-                rating_baseline=3.0
-            )
-
-            if item_aware and item_aware.get("item_contribs"):
-                chart_names = item_aware["feature_names"]
-                chart_vals = item_aware["shap_values"]
-                shap_img = explainer.create_shap_plot(
-                    shap_values=np.array(chart_vals),
-                    feature_names=chart_names,
-                    max_display=10,
-                    sort_values=False
-                )
-                because_titles = [c["title"] for c in item_aware.get("item_contribs", []) if c["weight"] > 0]
-                because_sentence = f"Because you liked {', '.join(because_titles[:3])}" if because_titles else ""
+        movie = movies.get(mid)
+        if not movie:
+            continue
+        
+        algorithm = rec.get('algorithm', 'popularity')
+        
+        if 'content' in algorithm:
+            # Content-based explanation
+            seed_movies = Rating.objects.filter(
+                user_id=user_id, 
+                rating__gte=4
+            ).order_by('-rating')[:3]
+            
+            if seed_movies:
+                seed_movie = seed_movies[0].movie
+                content_expl = explainer.explain_content_recommendation(seed_movie.id, movie.id)
+                why_text = f"Because you liked '{seed_movie.title}' and this movie has similar content"
+                lime_list = [
+                    {
+                        'feature': f.get('name') or f.get('feature') or '',
+                        'importance': f"{abs(f.get('contribution', 0.0)) * 100:.1f}%"
+                    }
+                    for f in (content_expl.get('features', []) or [])
+                ][:6]
             else:
-                # Fallback to user-global SHAP but label with real titles
-                names = collab_expl.get('feature_titles')
-                if not names:
-                    cols = load_user_movie_columns()
-                    names = []
-                    for i in (collab_expl.get('top_movies', []) or []):
-                        _, t = feature_to_movie(f"Movie_{i}", cols)
-                        names.append(t or f"Movie_{i}")
-                shap_img = explainer.create_shap_plot(
-                    shap_values=np.array(shap_vals),
-                    feature_names=names,
-                    max_display=10,
-                    sort_values=True
-                )
-                because_sentence = ""
-
-            # Humanized LIME list
-            lime_raw = collab_expl.get('lime_features', [])
-            lime_human = humanize_lime_factors(lime_raw, user_ratings_map)
-
-            why_text = explainer.generate_explanation_text(collab_expl, m.title)
-            final_why = because_sentence or why_text
-
+                why_text = "Based on content similarity with movies you might like"
+                lime_list = []
+            
             explain_cards.append({
-                'title': m.title,
-                'why': final_why,
-                'prob': f"{prob:.1%}",
-                'shap_img': shap_img,
-                'lime_list': lime_human,
-                'movie': m,
-            })
-
-    if not explain_cards:
-        movies = Movie.objects.order_by('-popularity')[:12]
-        for m in movies:
-            explain_cards.append({
-                'title': m.title,
-                'why': "Fallback to popularity since no model/explanations available yet.",
-                'prob': None,
+                'title': movie.title,
+                'why': why_text,
+                'prob': f"{(rec.get('score') or 0):.1%}",
                 'shap_img': None,
-                'lime_list': None,
-                'movie': m,
+                'lime_list': lime_list,
+                'movie': movie,
+                'algorithm': 'content',
+                'score': rec.get('score'),
             })
+        
+        elif 'genre' in algorithm:
+            # Genre-based explanation
+            user_genres = Rating.objects.filter(
+                user_id=user_id, 
+                rating__gte=4
+            ).values_list('movie__genres__name', flat=True).distinct()
+            
+            movie_genres = [g.name for g in movie.genres.all()]
+            common_genres = set(user_genres) & set(movie_genres)
+            
+            if common_genres:
+                genre_str = ', '.join(list(common_genres)[:2])
+                why_text = f"Because you enjoy {genre_str} movies"
+            else:
+                why_text = "Based on your genre preferences"
+            
+            explain_cards.append({
+                'title': movie.title,
+                'why': why_text,
+                'prob': f"{(rec.get('score') or 0):.1%}",
+                'shap_img': None,
+                'lime_list': [],
+                'movie': movie,
+                'algorithm': 'genre',
+                'score': rec.get('score'),
+            })
+        
+        elif 'collaborative' in algorithm:
+            # Collaborative filtering explanation
+            collab_expl = explainer.explain_collaborative_recommendation(user_id, movie.id)
+            
+            if not collab_expl.get('error'):
+                prob = collab_expl.get('prediction_probability', 0.0)
+                
+                # Item-aware chart for this specific movie
+                item_aware = explainer.explain_item_aware_with_content(
+                    user_id=user_id,
+                    candidate_movie_id=movie.id,
+                    content_model=getattr(recommendation_system, "content_model", None),
+                    top_k=8,
+                    rating_baseline=3.0
+                )
+                
+                if item_aware and item_aware.get("item_contribs"):
+                    chart_names = item_aware["feature_names"]
+                    chart_vals = item_aware["shap_values"]
+                    shap_img = explainer.create_shap_plot(
+                        shap_values=np.array(chart_vals),
+                        feature_names=chart_names,
+                        max_display=8,
+                        sort_values=False
+                    )
+                    
+                    positive_contribs = [c for c in item_aware.get("item_contribs", []) if c["weight"] > 0]
+                    if positive_contribs:
+                        top_movies = [c["title"] for c in positive_contribs[:3]]
+                        why_text = f"Because you liked {', '.join(top_movies)}"
+                    else:
+                        why_text = f"Recommended with {prob:.1%} confidence based on similar users"
+                else:
+                    shap_img = None
+                    why_text = f"Recommended with {prob:.1%} confidence based on similar users"
+                
+                # Humanized LIME
+                lime_raw = collab_expl.get('lime_features', [])
+                lime_list = humanize_lime_factors(lime_raw, user_ratings_map)
+                # Convert weights to percent strings for display
+                for d in lime_list:
+                    w = abs(d.get('weight') or 0)
+                    d['importance'] = f"{w * 100:.1f}%"
 
+                explain_cards.append({
+                    'title': movie.title,
+                    'why': why_text,
+                    'prob': f"{prob:.1%}",  # percent string
+                    'shap_img': shap_img,
+                    'lime_list': lime_list,
+                    'movie': movie,
+                    'algorithm': 'collaborative',
+                    'score': rec.get('score'),
+                })
+            else:
+                explain_cards.append({
+                    'title': movie.title,
+                    'why': "Recommended based on user preferences",
+                    'prob': f"{(rec.get('score') or 0):.1%}",
+                    'shap_img': None,
+                    'lime_list': [],
+                    'movie': movie,
+                    'algorithm': 'collaborative',
+                    'score': rec.get('score'),
+                })
+        
+        else:
+            # Default explanation
+            explain_cards.append({
+                'title': movie.title,
+                'why': f"Recommended based on {algorithm}",
+                'prob': f"{(rec.get('score') or 0):.1%}",
+                'shap_img': None,
+                'lime_list': [],
+                'movie': movie,
+                'algorithm': algorithm,
+                'score': rec.get('score'),
+            })
+    
     return render(request, 'recommendations/recommendations.html', {'cards': explain_cards})
+
+@login_required
+def my_watchlist(request):
+    user_id = request.user.id
+
+    # Source A: Rating.watchlist = True
+    rating_qs = (Rating.objects
+                 .filter(user_id=user_id, watchlist=True)
+                 .select_related('movie'))
+
+    movies_map = {r.movie_id: r.movie for r in rating_qs}
+
+    # Source B: Watchlist model rows (if model exists)
+    if WLModel is not None:
+        wl_qs = WLModel.objects.filter(user_id=user_id).select_related('movie')
+        for wl in wl_qs:
+            movies_map.setdefault(wl.movie_id, wl.movie)
+
+    movies = list(movies_map.values())
+    movies.sort(key=lambda m: (m.popularity or 0), reverse=True)
+
+    return render(request, 'recommendations/watchlist.html', {'movies': movies})
+
+@login_required
+def toggle_watchlist(request, movie_id):
+    user_id = request.user.id
+    movie = get_object_or_404(Movie, id=movie_id)
+
+    rating, created = Rating.objects.get_or_create(
+        user_id=user_id,
+        movie_id=movie.id,
+        defaults={'rating': None, 'watchlist': True}
+    )
+
+    # If it already existed, flip the flag
+    if not created:
+        rating.watchlist = not bool(getattr(rating, 'watchlist', False))
+        rating.save(update_fields=['watchlist', 'updated_at'])
+    # If created, it is already True
+
+    # Keep standalone Watchlist table in sync if it exists
+    if WLModel is not None:
+        if rating.watchlist:
+            WLModel.objects.get_or_create(user_id=user_id, movie_id=movie.id)
+        else:
+            WLModel.objects.filter(user_id=user_id, movie_id=movie.id).delete()
+
+    # AJAX support
+    if request.headers.get('x-requested-with') == 'XMLHttpRequest':
+        return JsonResponse({'ok': True, 'watchlist': bool(rating.watchlist)})
+
+    return redirect(request.META.get('HTTP_REFERER') or reverse('recs:watchlist'))

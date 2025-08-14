@@ -31,7 +31,10 @@
         <span class="badge text-bg-secondary">{{ g.name }}</span>
       {% empty %}<span class="text-muted">N/A</span>{% endfor %}
     </p>
-    <a class="btn btn-success" href="/recs/?seed={{ movie.id }}">Get similar recommendations with explanations</a>
+    <!-- <a class="btn btn-success" href="/recs/?seed={{ movie.id }}">Get similar recommendations with explanations</a> -->
+    <a href="{% url 'recs:list' %}?seed={{ movie.id }}" class="btn btn-outline-primary">
+      Recommend similar to this
+    </a>
   </div>
 </div>
 {% endblock %}

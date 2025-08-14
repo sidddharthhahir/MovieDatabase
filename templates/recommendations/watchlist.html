@@ -1,0 +1,43 @@
+{% extends "base.html" %}
+{% block title %}My Watchlist{% endblock %}
+
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-3">
+  <h2>My Watchlist</h2>
+  <a class="btn btn-sm btn-outline-secondary" href="{% url 'recs:list' %}">Back to Recommendations</a>
+</div>
+
+{% if movies %}
+  <div class="row row-cols-1 row-cols-md-2 g-4">
+    {% for m in movies %}
+      <div class="col">
+        <div class="card h-100">
+          <div class="row g-0">
+            <div class="col-md-4 p-2">
+              <img src="{{ m.poster_url }}" class="img-fluid rounded" alt="{{ m.title }}">
+            </div>
+            <div class="col-md-8">
+              <div class="card-body">
+                <div class="d-flex justify-content-between align-items-start">
+                  <h5 class="card-title mb-1">{{ m.title }}</h5>
+                  <span class="badge bg-info ms-2">Watchlist</span>
+                </div>
+                {% if m.tagline %}<p class="text-muted small mb-2">{{ m.tagline }}</p>{% endif %}
+                <div class="d-flex gap-2">
+                  <a href="{% url 'movies:detail' m.tmdb_id %}" class="btn btn-sm btn-outline-primary">View details</a>
+                  <a href="{% url 'recs:watchlist_toggle' m.id %}" class="btn btn-sm btn-outline-danger">Remove</a>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    {% endfor %}
+  </div>
+{% else %}
+  <div class="text-center text-muted my-5">
+    <p>Your watchlist is empty.</p>
+    <a class="btn btn-primary" href="{% url 'recs:list' %}">Find movies to add</a>
+  </div>
+{% endif %}
+{% endblock %}
