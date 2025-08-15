@@ -23,6 +23,7 @@ INSTALLED_APPS = [
     'accounts',
     'movies',
     'recommendations',
+    "widget_tweaks",
 ]
 
 MIDDLEWARE = [
